@@ -1,31 +1,18 @@
-# INFO:
-#  -> Student number must start with "06", be 10 characters long, and a valid number
-#  -> After 15 minutes (MAX_OUT_TIME), the student will be logged back in with "NOR"
-#  -> ADMIN_CODE -> Admin menu
-
-# 31 red
-# 32 green
-# 33 yellow
-# 34 blue
-# 35 purple
-# 36 cyan
-
 import math
+import subprocess
 import time
 from datetime import datetime, timedelta
 import os
 import json
+from typing import Tuple
 import dateutil.parser
 from pytimedinput import timedInput
-from csv_parser import searchCSV, readCSV
+from csv_parser2 import CSVParser
 import survey
+from settings import Settings
 
 # Constants
-MAX_OUT_TIME = 15  # Minutes
-
 USER_CSV = "prod(9-26-23).csv"
-PRINT_ENABLED = True
-ADMIN_CODE = "000"
 
 # Globals
 # {user, name, date_left}
@@ -35,7 +22,23 @@ out_students = []
 #   "user": [{user, first, last, grade}] (sorted by 06)
 #   "last": [{user, first, last, grade}] (sorted by last name)
 # }
-users = readCSV(USER_CSV)
+
+
+def transformUsersCSV(key: str, val: str) -> Tuple[str, any]:
+    if key == "Student Number":
+        return ("user", int("10" + val))
+    elif key == "First Name":
+        return ("first", val.capitalize())
+    elif key == "Last Name":
+        return ("last", val.capitalize())
+    elif key == "Curr Grade":
+        return ("grade", int(val))
+
+    return (key, val)
+
+
+users = CSVParser(USER_CSV, ["user", "last"], transformUsersCSV).read()
+settings = Settings()
 curr_mode = "normal"  # normal | admin | modes | csv_view
 page = 0
 
@@ -85,11 +88,12 @@ def check_students():
     for i, student in enumerate(out_students, start=1):
         # Gets current time as parsed date object
         dt = dateutil.parser.parse(str(student["date_left"]))
-        if (datetime.now() - dt).total_seconds() > MAX_OUT_TIME * 60:
+        if (datetime.now() - dt).total_seconds() > settings.data["MAX_OUT_MINUTES"] * 60:
             print(f"Out of time: {student['user']}")
 
             # Get the current date and time
-            offset_time = dt + timedelta(minutes=MAX_OUT_TIME)
+            offset_time = dt + \
+                timedelta(minutes=settings.data["MAX_OUT_MINUTES"])
             formatted_datetime = offset_time.strftime("%m/%d/%Y @ %H:%M:%S")
             log_input("NOR", student['user'] + " - " +
                       student["user"], formatted_datetime)
@@ -104,8 +108,10 @@ def check_students():
 def mode_normal():
     # Display count of students out of room "Currently out: 1 student" (yellow)
     if (len(out_students) > 0):
-        print(
-            f"\033[0;33mCurrently out\033[0m: {len(out_students)} student{'s' if len(out_students) > 1 else ''}\n")
+        student_names = []
+        for student in out_students[:5]:
+            student_names.append(f"{student['first']} {student['last']}")
+        print(f"\033[0;33mCurrently out\033[0m: {', '.join(student_names)}")
 
     flush_input()
     num, timedOut = timedInput("Scan or Enter your Student Number: ", timeout=10,
@@ -116,17 +122,19 @@ def mode_normal():
 
     os.system("cls")
 
-    # Display count of students out of room (yellow) "Currently out: 1 student"
+    # Display count of students out of room "Currently out: 1 student" (yellow)
     if (len(out_students) > 0):
-        print(
-            f"\033[0;33mCurrently out\033[0m: {len(out_students)} student{'s' if len(out_students) > 1 else ''}\n")
+        student_names = []
+        for student in out_students[:5]:
+            student_names.append(f"{student['first']} {student['last']}")
+        print(f"\033[0;33mCurrently out\033[0m: {', '.join(student_names)}")
 
     # Re-render the input
     print(f"Scan or Enter your Student Number: {num}\n")
 
     # Mode switcher
     global curr_mode
-    if num == ADMIN_CODE:
+    if num == settings.data["ADMIN"]:
         curr_mode = "modes"
         return 0
 
@@ -147,12 +155,13 @@ def mode_normal():
                 break
 
         # Retrieve their data from the csv file
-        userIdx = searchCSV(users["user"], int("1" + num))
+        userIdx = users.find(int("1" + num), "user", lambda user_obj, target_user: (
+            user_obj["user"] > target_user) - (user_obj["user"] < target_user))
         firstName = num
         lastName = ""
         if userIdx >= 0:
-            firstName = users["user"][userIdx]["first"]
-            lastName = users["user"][userIdx]["last"]
+            firstName = users.get(userIdx, "user")["first"]
+            lastName = users.get(userIdx, "user")["last"]
 
         if idx > -1:
             # Student returned
@@ -188,29 +197,34 @@ def mode_normal():
             # Add the paper cut command 'GS V 0'
             text_to_print += chr(29) + 'V' + chr(1)
 
-            if PRINT_ENABLED:
-                import win32print
-                import win32ui
-                # Get the default printer
-                printer_name = win32print.GetDefaultPrinter()
+            if settings.data["SHOULD_PROMPT_PRINT"]:
+                flush_input()
+                opts = ("No", "Yes (still needs signing)")
+                index = survey.routines.select(
+                    'Print pass?: ', options=opts)
+                if index == 1:
+                    import win32print
 
-                # Open the printer
-                hPrinter = win32print.OpenPrinter(printer_name)
+                    # Get the default printer
+                    printer_name = win32print.GetDefaultPrinter()
 
-                # Start a print job
-                try:
-                    hJob = win32print.StartDocPrinter(
-                        hPrinter, 1, ("print_job", None, "RAW"))
+                    # Open the printer
+                    hPrinter = win32print.OpenPrinter(printer_name)
+
+                    # Start a print job
                     try:
-                        # Write the text to the printer
-                        win32print.WritePrinter(
-                            hPrinter, text_to_print.encode())
+                        hJob = win32print.StartDocPrinter(
+                            hPrinter, 1, ("print_job", None, "RAW"))
+                        try:
+                            # Write the text to the printer
+                            win32print.WritePrinter(
+                                hPrinter, text_to_print.encode())
+                        finally:
+                            # End the print job
+                            win32print.EndDocPrinter(hPrinter)
                     finally:
-                        # End the print job
-                        win32print.EndDocPrinter(hPrinter)
-                finally:
-                    # Close the printer
-                    win32print.ClosePrinter(hPrinter)
+                        # Close the printer
+                        win32print.ClosePrinter(hPrinter)
             else:
                 print("\n================================================\n\n" +
                       text_to_print + "\n================================================\n")
@@ -246,7 +260,8 @@ def mode_admin():
         print(
             f"Admin Log ({math.floor(page/PAGE_LENGTH) + 1}/{MAX_PAGES}):\n")
         print(
-            "".join(text[slice((page * PAGE_LENGTH), ((page + 1) * PAGE_LENGTH))])
+            "".join(
+                text[slice((page * PAGE_LENGTH), ((page + 1) * PAGE_LENGTH))])
             .replace("OUT", "\033[0;33mOUT\033[0m")
             .replace("IN", "\033[0;32mIN\033[0m")
             .replace("NOR", "\033[0;31mNOR\033[0m")
@@ -273,11 +288,12 @@ def mode_admin():
 
     print("-----\n")
 
-    print(f"(\33[36m{ADMIN_CODE}\33[0m to return; \33[36mEnter\33[0m to next page, \33[36m'.'\33[0m to previous page)")
+    print(
+        f"(\33[36m{settings.data['ADMIN']}\33[0m to return; \33[36mEnter\33[0m to next page, \33[36m'.'\33[0m to previous page)")
     new_page = input("\nPage: ")
 
     # Return to selector page
-    if new_page.strip() == ADMIN_CODE:
+    if new_page.strip() == settings.data["ADMIN"]:
         global curr_mode
         curr_mode = "modes"
         page = 0
@@ -312,7 +328,7 @@ def mode_csv_view():
         return f"\033[0;{color}m{str(user['user'])[1:]} | {user['last']}, {user['first']}\033[0m\n"
 
     text = []
-    for i, user in enumerate(users["last"]):
+    for i, user in enumerate(users.data["last"]):
         # alternate colors to make it easier to read
         text.append(join(user, "36" if i % 2 == 1 else "0"))
 
@@ -326,11 +342,12 @@ def mode_csv_view():
     print(f"Total: {len(text)}")
     print("-----\n")
 
-    print(f"(\33[36m{ADMIN_CODE}\33[0m to return; \33[36mEnter\33[0m to next page, \33[36m'.'\33[0m to previous page)")
+    print(
+        f"(\33[36m{settings.data['ADMIN']}\33[0m to return; \33[36mEnter\33[0m to next page, \33[36m'.'\33[0m to previous page)")
     new_page = input("\nPage: ")
 
     # Return to selector page
-    if new_page.strip() == ADMIN_CODE:
+    if new_page.strip() == settings.data["ADMIN"]:
         global curr_mode
         curr_mode = "modes"
         page = 0
@@ -357,7 +374,7 @@ def mode_csv_view():
 def mode_modes():
     # Options
     opts = ("Normal (001)", "Admin Logs (002)", "View CSV buffer (003)",
-            "Reload CSV (004)", "Reload Out (005)")
+            "Reload CSV (004)", "Reload Out (005)", "Update Program [DANGER] (006)")
     index = survey.routines.select('Modes: ', options=opts)
 
     # Mode switcher
@@ -370,16 +387,16 @@ def mode_modes():
             curr_mode = "normal"
         case "002":
             curr_mode = "admin"
-            page = 1
+            page = 0
         case "003":
             curr_mode = "csv_view"
             page = 0
         case "004":
             global users
-            users = readCSV(USER_CSV)
+            users.read()
             print("\033[0;32mCSV reloaded\033[0m")
 
-            print(f"\n{len(users['user'])} students loaded")
+            print(f"\n{len(users.data['user'])} students loaded")
             return 2
         case "005":
             loadOutStudents()
@@ -396,6 +413,12 @@ def mode_modes():
             else:
                 print("\nNone")
                 return 2
+        case "006":
+            if os.path.isfile("update.py"):
+                subprocess.run(["python", "update.py"])
+                exit(0)
+            else:
+                print(f"Error: File not found - update.py")
 
     return 0
 
@@ -424,3 +447,11 @@ try:
         time.sleep(0.01)  # 10ms delay so program doesnt break computer
 except KeyboardInterrupt:
     print("\n\033[0;31mProgram was stopped by user\033[0m")
+    settings.save()
+
+# 31 red
+# 32 green
+# 33 yellow
+# 34 blue
+# 35 purple
+# 36 cyan
